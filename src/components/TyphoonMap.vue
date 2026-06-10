@@ -1,4 +1,4 @@
-<script setup lang="ts">
+<script setup>
 import { View } from 'ol'
 import TileLayer from 'ol/layer/Tile'
 import { XYZ } from 'ol/source'
@@ -7,12 +7,10 @@ import Map from 'ol/Map'
 import { fromLonLat } from 'ol/proj'
 import { defaults as defaultControls } from 'ol/control'
 
-const mapContainer = ref<HTMLElement>()
-const map = ref<Map>()
+const mapContainer = ref(null)
+const map = ref(null)
 
-const emit = defineEmits<{
-  (e: 'map-loaded', map: Map): void
-}>()
+const emit = defineEmits(['map-loaded'])
 
 defineExpose({ map })
 
@@ -42,7 +40,7 @@ onMounted(() => {
   })
 
   map.value.on('loadend', () => {
-    emit('map-loaded', map.value!)
+    emit('map-loaded', map.value)
   })
 })
 </script>
