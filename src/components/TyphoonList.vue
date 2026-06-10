@@ -24,7 +24,8 @@ const emit = defineEmits(['check-typhoon'])
 const lastSelected = ref(null)
 
 function selectChange(selection, row) {
-  const isChecked = row.tfbh !== lastSelected.value
+  const isChecked = selection.some((item) => item.tfbh === row.tfbh)
+
   lastSelected.value = isChecked ? row.tfbh : null
   emit('check-typhoon', row.tfbh, isChecked)
 }

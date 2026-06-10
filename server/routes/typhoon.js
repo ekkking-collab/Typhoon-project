@@ -7,4 +7,8 @@ router.get('/list', (req, res, next) => {
   typhoon.getTyphoonList(req, res, next)
 })
 
+router.get('/track/:tfbh', (req, res, next) => {
+  typhoon.getTyphoonTrack(req, res, next)
+})
+
 export default router

@@ -23,6 +23,21 @@ let typhoon = {
       })
     })
   },
+  // 根据台风编号获取轨迹点
+  getTyphoonTrack: function (req, res) {
+    const { tfbh } = req.params
+    const SQL = `select * from typhoon_live_info where tfbh = '${tfbh}' order by pass_time asc`
+    pool.connect((isErr, client, done) => {
+      client.query(SQL, function (isErr, result) {
+        done()
+        if (isErr) {
+          res.json(new R().err(isErr))
+        } else {
+          res.json(new R().ok(result.rows))
+        }
+      })
+    })
+  },
 }
 
 export default typhoon
