@@ -1,28 +1,87 @@
 import Feature from 'ol/Feature.js'
-import { LineString, Point } from 'ol/geom.js'
+import { LineString, Point, Polygon } from 'ol/geom.js'
 import VectorSource from 'ol/source/Vector.js'
 import VectorLayer from 'ol/layer/Vector.js'
 import { Style, Stroke, Circle, Fill } from 'ol/style.js'
 import { fromLonLat } from 'ol/proj.js'
+import Overlay from 'ol/Overlay.js'
+import proj4 from 'proj4'
+
 export class TyphoonPlayer {
   constructor(map) {
     this.map = map
-    this.typhoons = {} // 当前加载的台风 { '202203': Typhoon实例 }
+    this.typhoons = {}
+
     this.vectorSource = new VectorSource()
     this.vectorLayer = new VectorLayer({
       source: this.vectorSource,
-      // zIndex 设高一点，确保在底图上面
       zIndex: 10,
     })
     this.map.addLayer(this.vectorLayer)
+
+    // 弹窗：Overlay + DOM
+    this.popupEl = document.createElement('div')
+    this.popupEl.className = 'ol-popup'
+    this.popupEl.style.cssText = `
+      position: absolute;
+      background: white;
+      padding: 8px 12px;
+      border-radius: 4px;
+      font-size: 12px;
+      box-shadow: 0 2px 8px rgba(0,0,0,0.3);
+      pointer-events: none;
+      white-space: nowrap;
+    `
+    // 【关键】必须手动挂到 DOM 上，Overlay 不会帮你做这件事
+    document.body.appendChild(this.popupEl)
+
+    this.popup = new Overlay({
+      element: this.popupEl,
+      offset: [0, -10],
+      positioning: 'bottom-center',
+    })
+    this.map.addOverlay(this.popup)
+
+    // 鼠标悬停检测
+    this.map.on('pointermove', (e) => {
+      const typhoonFeatures = this.map.getFeaturesAtPixel(e.pixel, {
+        hitTolerance: 10,
+        layerFilter: (layer) => layer === this.vectorLayer,
+      })
+
+      if (typhoonFeatures.length > 0) {
+        const feature = typhoonFeatures[0]
+        const data = feature.get('data')
+        const coord = feature.getGeometry().getCoordinates()
+        console.log('命中 feature, data:', data, 'coord:', coord)
+
+        if (data) {
+          this.map.getTargetElement().style.cursor = 'pointer'
+
+          const time = data.pass_time ? new Date(data.pass_time).toLocaleString('zh-CN') : '/'
+
+          this.popupEl.innerHTML = `
+            <div><strong>${data.tfbh || ''}</strong></div>
+            <div>时间：${time}</div>
+            <div>风速：${data.wind_speed || '/'} m/s</div>
+            <div>气压：${data.pressure || '/'} hPa</div>
+            <div>移向：${data.move_dir || '/'}　移速：${data.move_speed || '/'} m/s</div>
+            <div>七级风圈：${data.circle7 || '/'} km</div>
+          `
+          this.popup.setPosition(coord)
+        }
+      } else {
+        this.map.getTargetElement().style.cursor = ''
+        this.popup.setPosition(undefined)
+      }
+    })
   }
 
   async addTyphoon(tfbh) {
-    // 1. 如果 this.typhoons[tfbh] 已存在，先 remove 再重建
     if (this.typhoons[tfbh]) {
       this.typhoons[tfbh].remove()
     }
-    // 2. fetch /typhoon/track/:tfbh 拿数据
+
     const res = await fetch(`/typhoon/track/${tfbh}`)
     const json = await res.json()
     const points = json.data
@@ -31,17 +90,16 @@ export class TyphoonPlayer {
       console.warn('没有找到台风数据：' + tfbh)
       return
     }
-    // 3. new Typhoon(this, data)
-    // 4. 存到 this.typhoons[tfbh]
+
     const typhoon = new Typhoon(this, points)
     this.typhoons[tfbh] = typhoon
 
-    // 视图飞到台风起点（仅视觉效果，不依赖回调）
+    // 视图飞到台风起点
     const firstPoint = points[0]
     const center = fromLonLat([parseFloat(firstPoint.lon), parseFloat(firstPoint.lat)])
     this.map.getView().animate({ zoom: 4, center: center, duration: 1000 })
 
-    // 用独立延迟启动轨迹动画，不等视图动画
+    // 延迟启动轨迹动画
     setTimeout(() => {
       if (this.typhoons[tfbh]) {
         typhoon.play()
@@ -50,8 +108,6 @@ export class TyphoonPlayer {
   }
 
   dropTyphoon(tfbh) {
-    // 1. this.typhoons[tfbh].remove()
-    // 2. delete this.typhoons[tfbh]
     if (this.typhoons[tfbh]) {
       this.typhoons[tfbh].remove()
       delete this.typhoons[tfbh]
@@ -65,15 +121,13 @@ class Typhoon {
     this.tfbh = points[0].tfbh
     this.name = points[0].name || ''
     this.points = points
-    this.features = [] // 这个台风创建的所有 Feature
+    this.features = []
+    this.circleFeatures = []  // 所有风圈 Feature（按点分组）
     this.playIndex = 0
     this.timer = null
-    this.stopped = false  // 停止标记，防止 remove 后继续播放
+    this.stopped = false
 
-    // 画静态路径线
     this.#drawTrack()
-    // 动画
-    // this.play()
   }
 
   #drawTrack() {
@@ -85,6 +139,7 @@ class Typhoon {
     // 路径线 —— 初始为空，播放时逐步增长
     this.lineFeature = new Feature({
       geometry: new LineString([]),
+      tfbh: this.tfbh,
     })
     this.lineFeature.setStyle(
       new Style({
@@ -94,9 +149,10 @@ class Typhoon {
     this.player.vectorSource.addFeature(this.lineFeature)
     this.features.push(this.lineFeature)
 
-    // 红色大圆点，表示台风此刻的位置
+    // 红色大圆点：台风当前位置
     this.currentPointFeature = new Feature({
       geometry: new Point(this.coords[0]),
+      tfbh: this.tfbh,
     })
     this.currentPointFeature.setStyle(
       new Style({
@@ -110,11 +166,19 @@ class Typhoon {
     this.player.vectorSource.addFeature(this.currentPointFeature)
     this.features.push(this.currentPointFeature)
 
-    // 已走过的轨迹点（小灰点）
+    // 轨迹点 + 风圈
+    const windLevels = [
+      { circle: 'circle7', color: 'rgba(0, 186, 178, 0.25)', strokeColor: '#00bab2' },
+      { circle: 'circle10', color: 'rgba(255, 255, 0, 0.25)', strokeColor: '#ffff00' },
+      { circle: 'circle12', color: 'rgba(218, 115, 65, 0.25)', strokeColor: '#da7341' },
+    ]
+
     this.pointFeatures = this.points.map((p, i) => {
       const feat = new Feature({
         geometry: new Point(this.coords[i]),
+        tfbh: this.tfbh,
       })
+      feat.set('data', p)
       feat.setStyle(
         new Style({
           image: new Circle({
@@ -124,15 +188,80 @@ class Typhoon {
           }),
         }),
       )
-      feat.set('visible', false) // 初始全隐藏
+      feat.set('visible', false)
       this.player.vectorSource.addFeature(feat)
       this.features.push(feat)
+
+      // 为每个点创建风圈 Feature
+      windLevels.forEach((level) => {
+        const ring = this.#createWindCircle(
+          parseFloat(p.lon), parseFloat(p.lat),
+          p[level.circle]
+        )
+        if (ring) {
+          const circleFeat = new Feature({
+            geometry: new Polygon([ring]),
+          })
+          circleFeat.setStyle(
+            new Style({
+              fill: new Fill({ color: level.color }),
+              stroke: new Stroke({ color: level.strokeColor, width: 1 }),
+            }),
+          )
+          circleFeat.set('visible', false)
+          circleFeat.set('pointIndex', i)  // 标记属于第几个点
+          this.circleFeatures.push(circleFeat)
+          this.player.vectorSource.addFeature(circleFeat)
+          this.features.push(circleFeat)
+        }
+      })
+
       return feat
     })
   }
 
+  /**
+   * 计算风圈多边形环
+   * @param {number} centerLon 中心经度
+   * @param {number} centerLat 中心纬度
+   * @param {string|null} circleStr "ne,nw,sw,se" 格式的四方向半径(km)
+   * @returns {Array|null} 坐标环数组 或 null
+   */
+  #createWindCircle(centerLon, centerLat, circleStr) {
+    if (!circleStr) return null
+
+    const parts = circleStr.split(',').map(Number)
+    if (parts.length < 4) return null
+
+    const [ne, nw, sw, se] = parts
+    if (!ne || ne <= 0) return null
+
+    // 中心点转到墨卡托（米制）
+    const center3857 = proj4('EPSG:4326', 'EPSG:3857', [centerLon, centerLat])
+
+    const quadrantRadii = [ne, nw, sw, se]
+    const degreeInterval = 6
+    const pointsPerQuadrant = Math.floor(360 / (degreeInterval * 4))  // = 15
+
+    const ring = []
+    for (let q = 0; q < 4; q++) {
+      // 象限顺序：NE(0°) → NW(90°) → SW(180°) → SE(270°)
+      const r = (quadrantRadii[q] || 0) * 1000  // km → 米
+      const startJ = q * pointsPerQuadrant
+      const endJ = (q + 1) * pointsPerQuadrant
+      for (let j = startJ; j <= endJ; j++) {
+        const angle = (degreeInterval * j * Math.PI) / 180
+        const x = center3857[0] + r * Math.cos(angle)
+        const y = center3857[1] + r * Math.sin(angle)
+        const coord4326 = proj4('EPSG:3857', 'EPSG:4326', [x, y])
+        ring.push(coord4326)
+      }
+    }
+
+    return ring
+  }
+
   remove() {
-    // 先打标记，防止 play 再创建新定时器
     this.stopped = true
 
     if (this.timer) {
@@ -140,7 +269,6 @@ class Typhoon {
       this.timer = null
     }
 
-    // 直接从 source 查出当前所有 Feature，找到属于本台风的
     const allFeatures = this.player.vectorSource.getFeatures()
     allFeatures.forEach((f) => {
       if (this.features.includes(f)) {
@@ -148,37 +276,37 @@ class Typhoon {
       }
     })
     this.features = []
+    this.circleFeatures = []
 
-    // 逐级强制刷新
     this.player.vectorSource.changed()
     this.player.vectorLayer.changed()
   }
 
   play() {
-    // 已被 stop/remove，不再继续
-    if (this.stopped) {
-      return
-    }
+    if (this.stopped) return
 
-    // 已播完，停下
     if (this.playIndex >= this.coords.length) {
       this.stop()
       return
     }
 
-    // 更新路径线：取前 playIndex+1 个点
+    // 更新路径线
     const visibleCoords = this.coords.slice(0, this.playIndex + 1)
     this.lineFeature.setGeometry(new LineString(visibleCoords))
 
     // 更新当前位置点
     this.currentPointFeature.setGeometry(new Point(this.coords[this.playIndex]))
 
-    // 显示之前走过的点
+    // 显示已走过的轨迹点
     for (let i = 0; i <= this.playIndex; i++) {
       this.pointFeatures[i].set('visible', true)
     }
 
-    // 推进一帧，200ms 后播放下一帧
+    // 更新风圈：只显示当前帧的风圈，隐藏其他的
+    this.circleFeatures.forEach((f) => {
+      f.set('visible', f.get('pointIndex') === this.playIndex)
+    })
+
     this.playIndex++
     this.timer = setTimeout(() => {
       this.play()
